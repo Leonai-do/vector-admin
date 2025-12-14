@@ -1,11 +1,7 @@
-> [!IMPORTANT]
-> This repo and project is no longer actively maintained by Mintplex Labs. We hope one day to grow the team large enough to restart dedicated support and updates for this project.
->
-> New issues and PRs _may_ be reviewed, but our main focus has moved to [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm). The application is still self-hostable and will function for most providers as-is, but any changes from those providers may have resulted in breaking changes.
->
-> We will not be archiving the repo or removing it so that we can return to it one day in the future.
-> Best,
-> Tim.
+> [!NOTE]
+> **WORK IN PROGRESS**
+> **LeonAI-DO** is a maintained fork of the original VectorAdmin project. 
+> It is currently under active development and some features may be changing.
 
 
 <p align="center">
