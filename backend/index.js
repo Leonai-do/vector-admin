@@ -66,6 +66,7 @@ app
     );
   })
   .on("error", function (err) {
+    console.error("Server startup error:", err);
     process.once("SIGUSR2", function () {
       Telemetry.flush();
       process.kill(process.pid, "SIGUSR2");
