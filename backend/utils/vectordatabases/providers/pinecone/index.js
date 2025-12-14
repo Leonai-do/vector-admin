@@ -5,12 +5,12 @@ const { DocumentVectors } = require("../../../../models/documentVectors");
 const { toChunks } = require("../../utils");
 const { storeVectorResult } = require("../../../storage");
 const { WorkspaceDocument } = require("../../../../models/workspaceDocument");
+const { Pinecone } = require("@pinecone-database/pinecone");
 
-class Pinecone {
+class PineconeProvider {
   constructor(connector) {
     this.name = "pinecone";
     this.config = this.setConfig(connector);
-    this.STARTER_TIER_UPSERT_DELAY = 15_000;
   }
 
   setConfig(config) {
@@ -19,278 +19,129 @@ class Pinecone {
     return { type, settings };
   }
 
-  // Docs: https://docs.pinecone.io/docs/projects#project-environment
-  // This tier does not allow namespace creation.
-  isStarterTier() {
-    const { settings } = this.config;
-    return settings.environment === "gcp-starter";
-  }
-
   async connect() {
-    const { PineconeClient } = require("@pinecone-database/pinecone");
     const { type, settings } = this.config;
 
     if (type !== "pinecone")
       throw new Error("Pinecone::Invalid Not a Pinecone connector instance.");
 
-    const client = new PineconeClient();
-    await client.init({
+    const client = new Pinecone({
       apiKey: settings.apiKey,
-      environment: settings.environment,
     });
 
-    const pineconeIndex = client.Index(settings.index);
-    const {
-      status: { ready, host },
-    } = await this.describeIndexRaw();
-    if (!ready) throw new Error("Pinecone::Index not ready.");
-
-    return { client, host, pineconeIndex };
+    const pineconeIndex = client.index(settings.index);
+    
+    // Verify connection/index existence
+    try {
+      const description = await client.describeIndex(settings.index);
+      if (!description || description.status.state !== "Ready") {
+        throw new Error("Pinecone::Index not ready.");
+      }
+      return { client, pineconeIndex, host: description.host };
+    } catch (e) {
+      throw new Error(`Pinecone::Connection failed: ${e.message}`);
+    }
   }
 
   async indexDimensions() {
     const { pineconeIndex } = await this.connect();
-    const description = await pineconeIndex.describeIndexStats1();
-    return Number(description?.dimension || 0);
+    try {
+      const stats = await pineconeIndex.describeIndexStats();
+      return Number(stats.dimension || 1536);
+    } catch (e) {
+      console.error("Pinecone::indexDimensions error", e);
+      return 1536; // Fallback
+    }
   }
 
   async describeIndexRaw() {
     const { settings } = this.config;
-    // 200 OK Example
-    //   {
-    //     "database": {
-    //         "name": string,
-    //         "metric": "cosine",
-    //         "dimension": 1536,
-    //         "replicas": 1,
-    //         "shards": 1,
-    //         "pods": 1
-    //     },
-    //     "status": {
-    //         "waiting": [],
-    //         "crashed": [],
-    //         "host": URL without protocol,
-    //         "port": 433,
-    //         "state": "Ready",
-    //         "ready": true
-    //     }
-    // }
-    return await fetch(
-      `https://controller.${settings.environment}.pinecone.io/databases/${settings.index}`,
-      {
-        method: "GET",
-        headers: {
-          "Api-Key": settings.apiKey,
+    try {
+      const client = new Pinecone({ apiKey: settings.apiKey });
+      const description = await client.describeIndex(settings.index);
+      return {
+        database: {
+          name: description.name,
+          dimension: description.dimension,
+          metric: description.metric,
         },
-      }
-    )
-      .then((res) => {
-        if (res.ok) {
-          return res.json();
-        }
-
-        const error = {
-          code: res?.status,
-          message: res?.statusText,
-          url: res?.url,
-        };
-        throw error;
-      })
-      .catch((e) => {
-        console.error("Pinecone.describeIndexRaw", e);
-        return {
-          database: {},
-          status: {
-            ready: false,
-            host: null,
-          },
-        };
-      });
+        status: {
+          ready: description.status.state === "Ready",
+          host: description.host,
+          state: description.status.state,
+        },
+      };
+    } catch (e) {
+      console.error("Pinecone.describeIndexRaw", e);
+      return {
+        database: {},
+        status: {
+          ready: false,
+          host: null,
+        },
+      };
+    }
   }
 
   async totalIndicies() {
     const { pineconeIndex } = await this.connect();
-    const { namespaces } = await pineconeIndex.describeIndexStats1();
-    const totalVectors = Object.values(namespaces).reduce(
-      (a, b) => a + (b?.vectorCount || 0),
-      0
-    );
-    return { result: totalVectors, error: null };
+    try {
+      const stats = await pineconeIndex.describeIndexStats();
+      const totalVectors = Object.values(stats.namespaces || {}).reduce(
+        (a, b) => a + (b.vectorCount || 0),
+        0
+      );
+      // Add global record count if available and namespaces are empty
+      return { result: totalVectors || stats.totalRecordCount || 0, error: null };
+    } catch (e) {
+      return { result: 0, error: e.message };
+    }
   }
 
-  // Collections === namespaces for Pinecone to normalize interfaces
   async collections() {
     return await this.namespaces();
   }
 
   async namespaces() {
     const { pineconeIndex } = await this.connect();
-    const { namespaces } = await pineconeIndex.describeIndexStats1();
-    const collections = Object.entries(namespaces).map(([name, values]) => {
-      return {
+    try {
+      const stats = await pineconeIndex.describeIndexStats();
+      return Object.entries(stats.namespaces || {}).map(([name, values]) => ({
         name,
-        count: values?.vectorCount || 0,
-      };
-    });
-
-    return collections;
+        count: values.vectorCount || 0,
+      }));
+    } catch (e) {
+      console.error("Pinecone::namespaces", e);
+      return [];
+    }
   }
 
   async namespaceExists(index, namespace = null) {
     if (namespace === null) throw new Error("No namespace value provided.");
-    const { namespaces } = await index.describeIndexStats1();
-    return namespaces.hasOwnProperty(namespace);
+    const { pineconeIndex } = await this.connect();
+    const stats = await pineconeIndex.describeIndexStats();
+    return stats.namespaces && stats.namespaces.hasOwnProperty(namespace);
   }
 
   async namespace(name = null) {
     if (name === null) throw new Error("No namespace value provided.");
     const { pineconeIndex } = await this.connect();
-    const { namespaces } = await pineconeIndex.describeIndexStats1();
-    const collection = namespaces.hasOwnProperty(name)
-      ? namespaces[name]
-      : null;
+    const stats = await pineconeIndex.describeIndexStats();
+    const collection = stats.namespaces ? stats.namespaces[name] : null;
+    
     if (!collection) return null;
-
     return {
       name,
       ...collection,
-      count: collection?.vectorCount || 0,
+      count: collection.vectorCount || 0,
     };
   }
 
-  // 200OK
-  // {
-  //   "results": [],
-  //   "matches": [
-  //       {
-  //           "id": string,
-  //           "score": number,
-  //           "values": number[],
-  //           "metadata": object
-  //       },
-  //       ...
-  //     ],
-  //   "error": // only present if there was an error
-  // }
-  async _rawQuery(host, queryParams = {}) {
-    const { settings } = this.config;
-    return await fetch(`https://${host}/query`, {
-      method: "POST",
-      headers: {
-        "Api-Key": settings.apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(queryParams),
-    })
-      .then((res) => {
-        if (res.ok) {
-          return res.json();
-        }
-
-        const { vector, ...params } = queryParams;
-        const error = {
-          code: res?.status,
-          message: res?.statusText,
-          url: res?.url,
-          failedWith: JSON.stringify(params),
-        };
-        throw error;
-      })
-      .catch((e) => {
-        console.error("Pinecone.rawQuery", e);
-        return {
-          matches: [],
-          error: e,
-        };
-      });
-  }
-
-  // 3-try topK progressive backoff when 500 error. This would be because the associated text/metadata
-  // exceeds the max POST response size Pinecone is willing to send.
-  // default topK is 1000, which is the max Pinecone allows.
-  // So first we try the given topK, then half, lastly quarter.
-  // Nothing fancy like an expo-backoff because we need to make sure we don't rate-limit ourselves.
-  async rawQuery(host = "", queryParams = {}) {
-    var queryResponse;
-    const initialPageSize = queryParams?.topK || 1_000;
-
-    queryResponse = await this._rawQuery(host, queryParams);
-    if (
-      !queryResponse.hasOwnProperty("error") ||
-      queryResponse?.error?.code !== 500
-    )
-      return queryResponse;
-
-    queryResponse = await this._rawQuery(host, {
-      ...queryParams,
-      topK: Math.floor(initialPageSize / 2),
-    });
-    if (
-      !queryResponse.hasOwnProperty("error") ||
-      queryResponse?.error?.code !== 500
-    )
-      return queryResponse;
-
-    queryResponse = await this._rawQuery(host, {
-      ...queryParams,
-      topK: Math.floor(initialPageSize / 4),
-    });
-    return queryResponse;
-  }
-
-  async rawGet(host, namespace, offset = 10, filterRunId = "") {
-    try {
-      const data = {
-        ids: [],
-        embeddings: [],
-        metadatas: [],
-        documents: [],
-        error: null,
-      };
-      const queryRequest = {
-        namespace,
-        topK: offset,
-        includeValues: true,
-        includeMetadata: true,
-        vector: Array.from({ length: 1536 }, () => 0),
-        filter: {
-          runId: { $ne: filterRunId },
-        },
-      };
-
-      const queryResult = await this.rawQuery(host, queryRequest);
-      if (!queryResult?.matches || queryResult.matches.length === 0) {
-        return { ...data, error: queryResult?.error || null };
-      }
-
-      queryResult.matches.forEach((match) => {
-        const { id, values = [], metadata = {} } = match;
-        data.ids.push(id);
-        data.embeddings.push(values);
-        data.metadatas.push(metadata);
-        data.documents.push(metadata?.text ?? "");
-      });
-      return data;
-    } catch (error) {
-      console.error("Pinecone::RawGet", error);
-      return {
-        ids: [],
-        embeddings: [],
-        metadatas: [],
-        documents: [],
-        error,
-      };
-    }
-  }
-
-  // Split, embed, and save a given document data that we get from the document processor
-  // API.
   async processDocument(
     namespace,
     documentData,
     embedderApiKey,
-    dbDocument,
-    pineconeIndex
+    dbDocument
   ) {
     try {
       const openai = new OpenAi(embedderApiKey);
@@ -306,28 +157,15 @@ class Pinecone {
       const cacheInfo = [];
       const vectors = [];
       const vectorValues = await openai.embedTextChunks(textChunks);
-      const submission = {
-        ids: [],
-        embeddings: [],
-        metadatas: [],
-        documents: [],
-      };
 
       if (!!vectorValues && vectorValues.length > 0) {
         for (const [i, vector] of vectorValues.entries()) {
+          const vectorId = v4();
           const vectorRecord = {
-            id: v4(),
+            id: vectorId,
             values: vector,
-            // [DO NOT REMOVE]
-            // LangChain will be unable to find your text if you embed manually and dont include the `text` key.
-            // https://github.com/hwchase17/langchainjs/blob/2def486af734c0ca87285a48f1a04c057ab74bdf/langchain/src/vectorstores/pinecone.ts#L64
             metadata: { ...metadata, text: textChunks[i] },
           };
-
-          submission.ids.push(vectorRecord.id);
-          submission.embeddings.push(vectorRecord.values);
-          submission.metadatas.push(metadata);
-          submission.documents.push(textChunks[i]);
 
           vectors.push(vectorRecord);
           documentVectors.push({
@@ -344,21 +182,16 @@ class Pinecone {
           });
         }
       } else {
-        console.error(
-          "Could not use OpenAI to embed document chunk! This document will not be recorded."
-        );
+        console.error("Could not use OpenAI to embed document chunk!");
+        return { success: false, message: "Embedding failed" };
       }
 
       if (vectors.length > 0) {
-        const chunks = [];
+        const { pineconeIndex } = await this.connect();
+        const targetNamespace = pineconeIndex.namespace(namespace);
+        
         for (const chunk of toChunks(vectors, 500)) {
-          chunks.push(chunk);
-          await pineconeIndex.upsert({
-            upsertRequest: {
-              vectors: [...chunk],
-              namespace,
-            },
-          });
+          await targetNamespace.upsert(chunk);
         }
       }
 
@@ -369,31 +202,32 @@ class Pinecone {
       );
       return { success: true, message: null };
     } catch (e) {
-      console.error("addDocumentToNamespace", e.message);
+      console.error("addDocumentToNamespace", e);
       return { success: false, message: e.message };
     }
   }
 
   async similarityResponse(namespace, queryVector, topK = 4) {
     const { pineconeIndex } = await this.connect();
+    const targetNamespace = pineconeIndex.namespace(namespace);
+    
+    const response = await targetNamespace.query({
+      vector: queryVector,
+      topK,
+      includeMetadata: true,
+      includeValues: false, // Optimized
+    });
+
     const result = {
       vectorIds: [],
       contextTexts: [],
       sourceDocuments: [],
       scores: [],
     };
-    const response = await pineconeIndex.query({
-      queryRequest: {
-        namespace,
-        vector: queryVector,
-        topK,
-        includeMetadata: true,
-      },
-    });
 
-    response.matches.forEach((match) => {
+    (response.matches || []).forEach((match) => {
       result.vectorIds.push(match.id);
-      result.contextTexts.push(match.metadata.text);
+      result.contextTexts.push(match.metadata ? match.metadata.text : "");
       result.sourceDocuments.push(match);
       result.scores.push(match.score);
     });
@@ -403,16 +237,18 @@ class Pinecone {
 
   async getMetadata(namespace = "", vectorIds = []) {
     const { pineconeIndex } = await this.connect();
-    const { vectors } = await pineconeIndex.fetch({
-      ids: vectorIds,
-      namespace,
-    });
+    const targetNamespace = pineconeIndex.namespace(namespace);
+    
+    const response = await targetNamespace.fetch(vectorIds);
     const metadatas = [];
 
-    Object.values(vectors)?.forEach((vector, i) => {
+    // Response.records is the new format in some versions, but fetch typically returns object map
+    const records = response.records || response.vectors || {};
+
+    Object.values(records).forEach((vector) => {
       metadatas.push({
         vectorId: vector.id,
-        ...(vector?.metadata || {}),
+        ...(vector.metadata || {}),
       });
     });
 
@@ -420,4 +256,4 @@ class Pinecone {
   }
 }
 
-module.exports.Pinecone = Pinecone;
+module.exports.Pinecone = PineconeProvider;
