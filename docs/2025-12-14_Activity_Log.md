@@ -26,3 +26,4 @@ Updated the `README.md` to officially designate the project as **LeonAI-DO**, a 
 - Project is locally updated and committed.
 - Remote push **successful**. Changes are now on `origin/master`.
 - [09:58] Completed Task 004: Hybrid Deployment & Dependency Updates. App running on localhost:3000.
+- [10:11] Created and switched to branch 'fix/initial-deployment-issues' for post-deployment bug fixing.
