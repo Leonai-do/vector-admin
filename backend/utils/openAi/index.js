@@ -1,15 +1,12 @@
-const { Configuration, OpenAIApi } = require("openai");
+const OpenAI = require("openai");
+
 class OpenAi {
   constructor(apiKey = "") {
-    const config = new Configuration({ apiKey });
-    const openai = new OpenAIApi(config);
-    this.openai = openai;
+    this.openai = new OpenAI({ apiKey });
   }
 
   async embedTextChunk(textChunk = "") {
-    const {
-      data: { data },
-    } = await this.openai.createEmbedding({
+    const { data } = await this.openai.embeddings.create({
       model: "text-embedding-ada-002",
       input: textChunk,
     });
@@ -19,9 +16,7 @@ class OpenAi {
   }
 
   async embedTextChunks(chunks = []) {
-    const {
-      data: { data },
-    } = await this.openai.createEmbedding({
+    const { data } = await this.openai.embeddings.create({
       model: "text-embedding-ada-002",
       input: chunks,
     });

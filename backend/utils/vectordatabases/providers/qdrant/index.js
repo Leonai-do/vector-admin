@@ -1,4 +1,4 @@
-const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter");
+const { RecursiveCharacterTextSplitter } = require("@langchain/textsplitters");
 const { OpenAi } = require("../../../openAi");
 const { v4 } = require("uuid");
 const { DocumentVectors } = require("../../../../models/documentVectors");
