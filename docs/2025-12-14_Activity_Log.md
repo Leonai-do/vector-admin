@@ -27,3 +27,4 @@ Updated the `README.md` to officially designate the project as **LeonAI-DO**, a 
 - Remote push **successful**. Changes are now on `origin/master`.
 - [09:58] Completed Task 004: Hybrid Deployment & Dependency Updates. App running on localhost:3000.
 - [10:11] Created and switched to branch 'fix/initial-deployment-issues' for post-deployment bug fixing.
+- [21:05] Successfully set up and launched the internal Document Processor (Flask) on port 8888 after resolving multiple Python 3.12 compatibility issues for `PyMuPDF`, `lxml`, `pandas`, `numpy`, and `greenlet` by upgrading `requirements.txt`.
